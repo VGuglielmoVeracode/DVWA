@@ -1,0 +1,47 @@
+stages:
+    - build
+    - security
+    - deploy
+
+# for a simple PHP app, this step is (almost) meaningless
+build_app:
+    image: alpine:3.12
+    stage: build
+    script: 
+        - tar --exclude='external' -zcvf upload.tar.gz app
+        - ls -lF
+    artifacts:
+        paths:
+            - upload.tar.gz
+veracode_scan:
+    image: veracode/api-wrapper-java:latest
+    stage: security
+    script:
+        # the scan WILL fail, so just fire and forget
+        - java -jar /opt/veracode/api-wrapper.jar -vid $VERACODE_API_ID -vkey $VERACODE_API_KEY
+            -action UploadAndScan -appname "VulnImages-DVWA" -createprofile false
+            -filepath upload.tar.gz -version "Commit ${CI_COMMIT_SHA:0:8} - Job $CI_JOB_ID"
+    allow_failure: true
+                    
+dockerize:
+    image: docker:stable
+    stage: deploy
+    variables:
+        DOCKER_DRIVER: overlay2
+        # docker 19.03 has TLS on by default, see https://about.gitlab.com/releases/2019/07/31/docker-in-docker-with-docker-19-dot-03/
+        DOCKER_TLS_CERTDIR: ""
+        REPOSITORY_URL: $REPO_URL
+    services:
+        - docker:19.03.0-dind
+    before_script:
+        - apk add --update python3 py-pip
+        - pip install awscli
+    script:
+        - $(aws ecr get-login --no-include-email --region us-east-2)
+        - docker build -t dvwa:$CI_PIPELINE_ID .
+        - docker tag dvwa:$CI_PIPELINE_ID $REPOSITORY_URL:dvwa-latest
+        - docker tag dvwa:$CI_PIPELINE_ID $REPOSITORY_URL:dvwa-$CI_PIPELINE_ID
+        - docker push $REPOSITORY_URL:dvwa-latest
+        - docker push $REPOSITORY_URL:dvwa-$CI_PIPELINE_ID
+    after_script:
+        - docker images
